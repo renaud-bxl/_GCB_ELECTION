@@ -1,0 +1,17 @@
+{
+  "name": "Geoffroy Coomans de Brachène — MR Bruxelles",
+  "short_name": "Geoffroy MR",
+  "description": "Site de campagne de Geoffroy Coomans de Brachène, candidat à la présidence de la Régionale MR Bruxelles & Périphérie",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#272d5f",
+  "theme_color": "#272d5f",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "64x64",
+      "type": "image/x-icon"
+    }
+  ]
+}
