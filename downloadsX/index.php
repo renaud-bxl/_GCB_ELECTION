@@ -210,12 +210,35 @@
     <span class="supported">
       <span class="site-tag">xHamster</span>
       <span class="site-tag">xVideos</span>
+      <span class="site-tag">xNXX</span>
       <span class="site-tag">PornHub</span>
       <span class="site-tag">RedTube</span>
+      <span class="site-tag">SpankBang</span>
+      <span class="site-tag">Eporner</span>
+      <span class="site-tag">TNAFlix</span>
+      <span class="site-tag">Beeg</span>
+      <span class="site-tag">Tube8</span>
+      <span class="site-tag">YouPorn</span>
+      <span class="site-tag">DrTuber</span>
+      <span class="site-tag">Motherless</span>
+      <span class="site-tag">Dailymotion</span>
+      <span class="site-tag">Vimeo</span>
+      <span class="site-tag">Streamable</span>
+      <span class="site-tag">Rumble</span>
+      <span class="site-tag">VK</span>
+      <span class="site-tag">OK.ru</span>
+      <span class="site-tag">Facebook</span>
+      <span class="site-tag">Instagram</span>
+      <span class="site-tag">Twitter/X</span>
+      <span class="site-tag">TikTok</span>
+      <span class="site-tag">JWPlayer</span>
+      <span class="site-tag">VideoJS</span>
+      <span class="site-tag">Brightcove</span>
       <span class="site-tag">HTML5 générique</span>
       <span class="site-tag">OG:video</span>
       <span class="site-tag">JSON-LD</span>
       <span class="site-tag">HLS/m3u8</span>
+      <span class="site-tag">DASH/mpd</span>
     </span>
   </p>
 </div>
