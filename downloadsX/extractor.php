@@ -14,6 +14,17 @@ class VideoExtractor
     private const VIDEO_EXTS  = ['mp4','webm','ogg','avi','mov','mkv','flv','ts','m4v','wmv','3gp'];
     private const STREAM_EXTS = ['m3u8','mpd'];
 
+    // Domains that serve ads/trackers — never treat their URLs as video sources
+    private const BLOCKED_DOMAINS = [
+        'tsyndicate.com','doubleclick.net','googlesyndication.com','googleadservices.com',
+        'adnxs.com','rubiconproject.com','pubmatic.com','openx.net','casalemedia.com',
+        'adsafeprotected.com','moatads.com','scorecardresearch.com','quantserve.com',
+        'taboola.com','outbrain.com','trafficjunky.net','adtng.com','juicyads.com',
+        'exoclick.com','plugrush.com','traffic-media.co','hilltopads.net','propellerads.com',
+        'popcash.net','ero-advertising.com','adspyglass.com','cdn.syndication',
+        'syndication.com','spot.js','analytics.','gtm.','tracking.',
+    ];
+
     public function __construct(string $url)
     {
         $this->url = $url;
@@ -191,38 +202,134 @@ class VideoExtractor
     private function xhamster(string $html): array
     {
         $s = [];
-        // window.initials JSON
-        foreach ([
-            '/window\.initials\s*=\s*(\{.+?\});\s*(?:window|<\/script)/s',
-            '/window\.initials\s*=\s*(\{.+\})\s*;?\s*$/m',
-        ] as $pat) {
-            if (preg_match($pat, $html, $m)) {
-                $data = @json_decode($m[1], true);
-                $mp4  = $data['videoInitials']['videoModel']['sources']['mp4'] ?? null;
-                if (is_array($mp4)) {
-                    foreach ($mp4 as $q => $url) {
-                        if ($this->validUrl($url)) $s[] = $this->src($url, $q, 'mp4', 'xhamster');
+
+        // Strategy 1 : extract window.initials using balanced-brace parser (handles huge JSON)
+        $pos = strpos($html, 'window.initials');
+        if ($pos !== false) {
+            $start = strpos($html, '{', $pos);
+            if ($start !== false) {
+                $json = $this->extractBalancedJson($html, $start);
+                if ($json) {
+                    $data = @json_decode($json, true);
+                    // Navigate possible structures
+                    foreach ([
+                        $data['videoInitials']['videoModel']['sources'] ?? null,
+                        $data['initials']['videoModel']['sources'] ?? null,
+                        $data['videoModel']['sources'] ?? null,
+                    ] as $sources) {
+                        if (!is_array($sources)) continue;
+                        foreach ($sources['mp4'] ?? [] as $q => $url) {
+                            if ($this->validVideoUrl($url)) $s[] = $this->src($url, $q, 'mp4', 'xhamster');
+                        }
+                        $hls = $sources['hls'] ?? null;
+                        if (is_string($hls) && $this->validVideoUrl($hls))
+                            $s[] = $this->src($hls, 'hls', 'm3u8', 'xhamster');
                     }
                 }
-                $hls = $data['videoInitials']['videoModel']['sources']['hls'] ?? null;
-                if (is_string($hls) && $this->validUrl($hls))
-                    $s[] = $this->src($hls, 'hls', 'm3u8', 'xhamster');
             }
         }
-        // "sources":{"mp4":{...}}
-        if (preg_match('/"sources"\s*:\s*\{[^}]*"mp4"\s*:\s*(\{[^}]+\})/s', $html, $m)) {
-            $mp4 = @json_decode($m[1], true);
-            if (is_array($mp4)) {
-                foreach ($mp4 as $q => $url) {
-                    if ($this->validUrl($url)) $s[] = $this->src($url, $q, 'mp4', 'xhamster');
+
+        // Strategy 2 : look for xhvid / xhcdn patterns in script tags
+        foreach ([$html] as $src) {
+            // "sources":{"mp4":{"1080p":"url",...}}
+            if (preg_match('/"sources"\s*:\s*\{[^{]*"mp4"\s*:\s*(\{[^}]+\})/s', $src, $m)) {
+                $mp4 = @json_decode($m[1], true);
+                if (is_array($mp4)) {
+                    foreach ($mp4 as $q => $url) {
+                        if ($this->validVideoUrl($url)) $s[] = $this->src($url, $q, 'mp4', 'xhamster');
+                    }
+                }
+            }
+            // HLS source
+            if (preg_match('/"hls"\s*:\s*"(https?:[^"]+\.m3u8[^"]*)"/i', $src, $m))
+                $s[] = $this->src(stripslashes($m[1]), 'hls', 'm3u8', 'xhamster');
+        }
+
+        // Strategy 3 : xHamster API (video ID from URL)
+        if (empty($s)) {
+            $s = array_merge($s, $this->xhamsterApi());
+        }
+
+        // Strategy 4 : direct CDN mp4 URLs (xhamster CDN hosts)
+        $xhCdns = ['xhcdn.com','xhamster.com','xhcdn.one','cdntraffic'];
+        if (preg_match_all('/"(https?:\/\/[^"]+\.mp4[^"]*)"/i', $html, $m)) {
+            foreach ($m[1] as $url) {
+                $url  = stripslashes($url);
+                $host = strtolower(parse_url($url, PHP_URL_HOST) ?? '');
+                foreach ($xhCdns as $cdn) {
+                    if (str_contains($host, $cdn)) {
+                        $s[] = $this->src($url, 'unknown', 'mp4', 'xhamster-cdn');
+                        break;
+                    }
                 }
             }
         }
-        // CDN MP4 direct URLs
-        if (preg_match_all('/"(https?:\/\/[^"]*cdn[^"]*\.mp4[^"]*)"/', $html, $m)) {
-            foreach ($m[1] as $url) $s[] = $this->src(html_entity_decode($url), 'unknown', 'mp4', 'xhamster-cdn');
-        }
+
         return $s;
+    }
+
+    private function xhamsterApi(): array
+    {
+        $s = [];
+        // Extract video ID from URL (e.g. xhKBfXx from .../videos/title-xhKBfXx)
+        if (!preg_match('/-(xh[A-Za-z0-9]+)$/', parse_url($this->url, PHP_URL_PATH) ?? '', $m)) return $s;
+        $videoId = $m[1];
+
+        // Try xHamster embed endpoint which returns JSON with sources
+        $embedUrl = 'https://xhamster.com/embed/' . $videoId;
+        try {
+            $res  = $this->fetchUrl($embedUrl, ['Referer: ' . $this->url]);
+            $body = $res['body'];
+
+            // Parse the embed page for sources
+            $pos = strpos($body, 'window.initials');
+            if ($pos !== false) {
+                $start = strpos($body, '{', $pos);
+                if ($start !== false) {
+                    $json = $this->extractBalancedJson($body, $start);
+                    $data = @json_decode($json ?: '{}', true);
+                    foreach ([
+                        $data['videoInitials']['videoModel']['sources'] ?? null,
+                        $data['initials']['videoModel']['sources'] ?? null,
+                    ] as $sources) {
+                        if (!is_array($sources)) continue;
+                        foreach ($sources['mp4'] ?? [] as $q => $url) {
+                            if ($this->validVideoUrl($url)) $s[] = $this->src($url, $q, 'mp4', 'xhamster-api');
+                        }
+                        $hls = $sources['hls'] ?? null;
+                        if (is_string($hls) && $this->validVideoUrl($hls))
+                            $s[] = $this->src($hls, 'hls', 'm3u8', 'xhamster-api');
+                    }
+                }
+            }
+        } catch (Throwable) {}
+
+        return $s;
+    }
+
+    // Extract a complete balanced {...} JSON block starting at $start
+    private function extractBalancedJson(string $html, int $start): string
+    {
+        $depth  = 0;
+        $inStr  = false;
+        $escape = false;
+        $len    = strlen($html);
+        $end    = $start;
+
+        for ($i = $start; $i < $len; $i++) {
+            $c = $html[$i];
+            if ($escape) { $escape = false; continue; }
+            if ($c === '\\' && $inStr) { $escape = true; continue; }
+            if ($c === '"') { $inStr = !$inStr; continue; }
+            if ($inStr) continue;
+            if ($c === '{') { $depth++; }
+            elseif ($c === '}') {
+                $depth--;
+                if ($depth === 0) { $end = $i; break; }
+            }
+        }
+        if ($end <= $start) return '';
+        return substr($html, $start, $end - $start + 1);
     }
 
     private function xvideos(string $html): array
@@ -859,16 +966,15 @@ class VideoExtractor
     {
         $s = [];
         $patterns = [
-            '/["\']?(?:src|file|url|videoUrl|video_url|videoSrc|source_url|stream_url|hls_url|mp4_url|cdn_url)\b["\']?\s*:\s*["\']([^"\']{15,})["\']/',
             '/["\']?(?:file|src)\s*["\']?\s*:\s*["\']([^"\']+\.(?:mp4|webm|m3u8|mpd|ts|ogg)[^"\']*)["\']/',
             '/(?:setVideoUrl|setFile|setSrc)\([\'"]([^\'"]+)[\'"]\)/',
-            '/(?:mp4|hls|dash|webm|stream)\s*:\s*["\']([^"\']{15,})["\']/',
+            '/(?:mp4|hls|dash|webm)\s*:\s*["\']([^"\']{15,}\.(?:mp4|webm|m3u8|mpd)[^"\']*)["\']/',
         ];
         foreach ($patterns as $pat) {
             if (preg_match_all($pat, $html, $m)) {
                 foreach ($m[1] as $raw) {
                     $url = $this->resolveUrl(stripslashes(html_entity_decode($raw)));
-                    if ($url && $this->isVideoUrl($url)) $s[] = $this->src($url, 'unknown', $this->guessExt($url), 'js-pattern');
+                    if ($url && $this->isCleanVideoUrl($url)) $s[] = $this->src($url, 'unknown', $this->guessExt($url), 'js-pattern');
                 }
             }
         }
@@ -881,7 +987,7 @@ class VideoExtractor
         if (preg_match_all('/(https?:\/\/[^\s"\'<>]+\.(?:mp4|webm|ogg|m3u8|mpd|ts|m4v)[^\s"\'<>]*)/i', $html, $m)) {
             foreach ($m[1] as $url) {
                 $url = html_entity_decode(rtrim($url, '.,;)\\'));
-                if ($this->validUrl($url)) $s[] = $this->src($url, 'unknown', $this->guessExt($url), 'direct-url');
+                if ($this->isCleanVideoUrl($url)) $s[] = $this->src($url, 'unknown', $this->guessExt($url), 'direct-url');
             }
         }
         return $s;
@@ -893,7 +999,7 @@ class VideoExtractor
         if (preg_match_all('/["\']?(https?:\/\/[^"\'<>\s]+\.m3u8[^"\'<>\s]*)["\']?/i', $html, $m)) {
             foreach ($m[1] as $url) {
                 $url = html_entity_decode(rtrim($url, '.,;)\\'));
-                if ($this->validUrl($url)) $s[] = $this->src($url, 'hls', 'm3u8', 'm3u8-scan');
+                if ($this->isCleanVideoUrl($url)) $s[] = $this->src($url, 'hls', 'm3u8', 'm3u8-scan');
             }
         }
         return $s;
@@ -905,7 +1011,7 @@ class VideoExtractor
         if (preg_match_all('/["\']?(https?:\/\/[^"\'<>\s]+\.mpd[^"\'<>\s]*)["\']?/i', $html, $m)) {
             foreach ($m[1] as $url) {
                 $url = html_entity_decode(rtrim($url, '.,;)\\'));
-                if ($this->validUrl($url)) $s[] = $this->src($url, 'dash', 'mpd', 'mpd-scan');
+                if ($this->isCleanVideoUrl($url)) $s[] = $this->src($url, 'dash', 'mpd', 'mpd-scan');
             }
         }
         return $s;
@@ -955,6 +1061,25 @@ class VideoExtractor
             && (str_starts_with($url, 'http://') || str_starts_with($url, 'https://'));
     }
 
+    // Like validUrl but also checks the URL looks like a real video (has video extension)
+    // and is not from a known ad/tracker domain
+    private function validVideoUrl(string $url): bool
+    {
+        if (!$this->validUrl($url)) return false;
+        if ($this->isBlockedDomain($url)) return false;
+        return $this->isVideoUrl($url);
+    }
+
+    private function isBlockedDomain(string $url): bool
+    {
+        $host  = strtolower(parse_url($url, PHP_URL_HOST) ?? '');
+        $lower = strtolower($url);
+        foreach (self::BLOCKED_DOMAINS as $bd) {
+            if (str_contains($host, $bd) || str_contains($lower, $bd)) return true;
+        }
+        return false;
+    }
+
     private function guessExt(string $url): string
     {
         $path = strtolower(parse_url($url, PHP_URL_PATH) ?? '');
@@ -977,6 +1102,11 @@ class VideoExtractor
             if (str_contains($lower, '.' . $ext)) return true;
         }
         return false;
+    }
+
+    private function isCleanVideoUrl(string $url): bool
+    {
+        return $this->isVideoUrl($url) && !$this->isBlockedDomain($url);
     }
 
     private function qualityScore(array $src): int
