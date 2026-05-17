@@ -9,7 +9,7 @@ php_value memory_limit 128M
     Header always set Referrer-Policy "no-referrer"
 </IfModule>
 
-# Bloquer l'accès direct à extractor.php
-<Files "extractor.php">
+# Bloquer l'accès direct aux fichiers internes
+<FilesMatch "^(extractor\.php|playwright-extract\.js|package.*\.json)$">
     Require all denied
-</Files>
+</FilesMatch>

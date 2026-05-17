@@ -14,6 +14,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require_once __DIR__ . '/extractor.php';
 
+function playwrightExtract(string $url): array
+{
+    $script  = __DIR__ . '/playwright-extract.js';
+    if (!file_exists($script)) return [];
+
+    // Find node binary
+    $node = trim((string)shell_exec('which node 2>/dev/null'))
+         ?: '/opt/node22/bin/node';
+    if (!$node || !file_exists($node)) return [];
+
+    $cmd     = escapeshellarg($node) . ' ' . escapeshellarg($script) . ' ' . escapeshellarg($url) . ' 25000';
+    $output  = '';
+    $retcode = 0;
+
+    // Run with timeout (30s hard limit via shell)
+    $descriptors = [0 => ['pipe','r'], 1 => ['pipe','w'], 2 => ['pipe','w']];
+    $proc = proc_open('timeout 30 ' . $cmd, $descriptors, $pipes);
+    if (!is_resource($proc)) return [];
+
+    fclose($pipes[0]);
+    $output = stream_get_contents($pipes[1]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    proc_close($proc);
+
+    $data = @json_decode($output ?: '[]', true);
+    return is_array($data) ? $data : [];
+}
+
 function jsonError(string $message, int $code = 400): never
 {
     http_response_code($code);
@@ -32,22 +61,55 @@ switch ($action) {
         if (empty($url)) jsonError('Paramètre "url" manquant');
         if (!filter_var($url, FILTER_VALIDATE_URL)) jsonError('URL invalide');
 
+        $usePlaywright = (bool)($_GET['pw'] ?? false);   // force playwright
+        $title = $thumbnail = '';
+        $sources = [];
+        $method  = 'php';
+
         try {
+            // Step 1 — PHP extractor (fast, no browser)
             $extractor = new VideoExtractor($url);
             $extractor->fetch();
-            $sources = $extractor->extract();
+            $sources   = $extractor->extract();
+            $title     = $extractor->getTitle();
+            $thumbnail = $extractor->getThumbnail();
 
-            echo json_encode([
-                'success'   => true,
-                'url'       => $url,
-                'title'     => $extractor->getTitle(),
-                'thumbnail' => $extractor->getThumbnail(),
-                'sources'   => $sources,
-                'count'     => count($sources),
-            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+            // Filter out note-only entries
+            $realSources = array_filter($sources, fn($s) => !empty($s['url']));
+
+            // Step 2 — Playwright fallback if PHP found nothing real
+            if (empty($realSources) || $usePlaywright) {
+                $pw = playwrightExtract($url);
+                if (!empty($pw)) {
+                    // Merge: playwright results take priority, but keep PHP metadata
+                    $existingUrls = array_column($sources, 'url');
+                    foreach ($pw as $s) {
+                        if (!in_array($s['url'], $existingUrls, true)) {
+                            $sources[] = $s;
+                        }
+                    }
+                    $method = empty($realSources) ? 'playwright' : 'php+playwright';
+                }
+            }
         } catch (Throwable $e) {
-            jsonError($e->getMessage(), 500);
+            // PHP extraction failed — try playwright anyway
+            try {
+                $sources = playwrightExtract($url);
+                $method  = 'playwright-only';
+            } catch (Throwable $e2) {
+                jsonError($e->getMessage() . ' | PW: ' . $e2->getMessage(), 500);
+            }
         }
+
+        echo json_encode([
+            'success'   => true,
+            'url'       => $url,
+            'title'     => $title,
+            'thumbnail' => $thumbnail,
+            'sources'   => array_values($sources),
+            'count'     => count(array_filter($sources, fn($s) => !empty($s['url']))),
+            'method'    => $method,
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
         break;
 
     case 'download':
