@@ -124,7 +124,7 @@ class VideoExtractor
 
         foreach ($allHtml as $html) {
             // ---- Adult / tube sites
-            if (str_contains($domain, 'xhamster'))    $sources = array_merge($sources, $this->xhamster($html));
+            if (str_contains($domain, 'xhamster'))    $sources = array_merge($sources, $this->xhamster($html), $this->xhamsterJsonTag($html));
             if (str_contains($domain, 'xvideos'))     $sources = array_merge($sources, $this->xvideos($html));
             if (str_contains($domain, 'pornhub'))     $sources = array_merge($sources, $this->pornhub($html));
             if (str_contains($domain, 'redtube'))     $sources = array_merge($sources, $this->redtube($html));
@@ -304,6 +304,29 @@ class VideoExtractor
             }
         } catch (Throwable) {}
 
+        return $s;
+    }
+
+    // xHamster also embeds data in <script type="application/json" id="initials-jsonPageData">
+    private function xhamsterJsonTag(string $html): array
+    {
+        $s = [];
+        if (!preg_match('/<script[^>]+id=["\']initials-jsonPageData["\'][^>]*>(.+?)<\/script>/is', $html, $m)) return $s;
+        $data = @json_decode($m[1], true);
+        if (!is_array($data)) return $s;
+        foreach ([
+            $data['videoInitials']['videoModel']['sources'] ?? null,
+            $data['initials']['videoModel']['sources']      ?? null,
+            $data['videoModel']['sources']                  ?? null,
+        ] as $sources) {
+            if (!is_array($sources)) continue;
+            foreach ($sources['mp4'] ?? [] as $q => $url) {
+                if ($this->validVideoUrl($url)) $s[] = $this->src($url, (string)$q, 'mp4', 'xhamster-tag');
+            }
+            $hls = $sources['hls'] ?? null;
+            if (is_string($hls) && $this->validVideoUrl($hls))
+                $s[] = $this->src($hls, 'hls', 'm3u8', 'xhamster-tag');
+        }
         return $s;
     }
 
@@ -903,7 +926,7 @@ class VideoExtractor
         if (preg_match_all('/<video[^>]+src=["\']([^"\']+)["\'][^>]*>/i', $html, $m)) {
             foreach ($m[1] as $url) {
                 $url = $this->resolveUrl($url);
-                if ($url) $s[] = $this->src($url, 'unknown', $this->guessExt($url), 'video-tag');
+                if ($url && !$this->isBlockedDomain($url)) $s[] = $this->src($url, 'unknown', $this->guessExt($url), 'video-tag');
             }
         }
         return $s;
@@ -916,7 +939,7 @@ class VideoExtractor
             foreach ($tags[1] as $attrs) {
                 if (preg_match('/src=["\']([^"\']+)["\']/', $attrs, $sm)) {
                     $url = $this->resolveUrl($sm[1]);
-                    if (!$url) continue;
+                    if (!$url || $this->isBlockedDomain($url)) continue;
                     $label = '';
                     if (preg_match('/(?:label|res|size)=["\']([^"\']+)["\']/', $attrs, $lm)) $label = $lm[1];
                     $s[] = $this->src($url, $label ?: 'unknown', $this->guessExt($url), 'source-tag');
@@ -929,14 +952,15 @@ class VideoExtractor
     private function extractMetaTags(string $html): array
     {
         $s = [];
+        // [inner regex pattern (no delimiters), label]
         $metas = [
-            '/property=["\']og:video(?::url)?["\']/i' => 'og:video',
-            '/name=["\']twitter:player:stream["\']/i'  => 'twitter:player',
-            '/property=["\']video:url["\']/i'          => 'video:url',
+            ['property=["\']og:video(?::url)?["\']', 'og:video'],
+            ['name=["\']twitter:player:stream["\']',  'twitter:player'],
+            ['property=["\']video:url["\']',           'video:url'],
         ];
-        foreach ($metas as $detect => $label) {
-            if (preg_match("/<meta[^>]+{$detect}[^>]+content=[\"']([^\"']+)[\"'][^>]*>/i", $html, $m)
-             || preg_match("/<meta[^>]+content=[\"']([^\"']+)[\"'][^>]+{$detect}[^>]*>/i", $html, $m)) {
+        foreach ($metas as [$detect, $label]) {
+            if (preg_match('/<meta[^>]+' . $detect . '[^>]+content=["\']([^"\']+)["\'][^>]*>/i', $html, $m)
+             || preg_match('/<meta[^>]+content=["\']([^"\']+)["\'][^>]+' . $detect . '[^>]*>/i', $html, $m)) {
                 $url = $this->resolveUrl(html_entity_decode($m[1]));
                 if ($url && $this->isVideoUrl($url)) $s[] = $this->src($url, 'unknown', $this->guessExt($url), $label);
             }
@@ -1112,12 +1136,14 @@ class VideoExtractor
     private function qualityScore(array $src): int
     {
         $q = strtolower($src['quality'] ?? '');
+        // Keys must stay as strings — use explicit string cast to avoid PHP int-key coercion
         foreach ([
-            '4k'=>95,'2160'=>95,'1440'=>88,'1080'=>80,'720'=>70,
-            '480'=>50,'360'=>40,'240'=>30,'hd'=>75,'sd'=>45,
-            'hls'=>60,'dash'=>62,'high'=>72,'med'=>48,'low'=>32,
+            '4k'   => 95, '2160' => 95, '1440' => 88, '1080' => 80,
+            '720'  => 70, '480'  => 50, '360'  => 40, '240'  => 30,
+            'hd'   => 75, 'sd'   => 45, 'hls'  => 60, 'dash' => 62,
+            'high' => 72, 'med'  => 48, 'low'  => 32,
         ] as $k => $v) {
-            if (str_contains($q, $k)) return $v;
+            if (str_contains($q, (string)$k)) return $v;
         }
         return 20;
     }
